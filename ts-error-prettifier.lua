@@ -1,117 +1,122 @@
 -- ts-error-prettifier.lua
--- A simple Neovim plugin to make TypeScript errors more readable.
+-- An improved Neovim plugin to make TypeScript errors more readable.
 -- Location: e.g., ~/.config/nvim/lua/ts-error-prettifier.lua
--- Or for a plugin structure: ~/.config/nvim/plugin/ts-error-prettifier.lua
 
 local M = {}
 
+-- Default configuration options
+local config = {
+  indent = "  ", -- Two spaces, but user can override
+}
+
 --[[
-This function takes a string containing a TypeScript type definition
-(e.g., "{ a: string; b: { c: number; }; }") and formats it with
-proper indentation to make it readable.
+This function takes a string containing a TypeScript type definition and formats it.
+It's rewritten to be more robust and handle complex types, unions, and generics.
 ]]
 local function format_type_string(type_str)
-	local formatted = ""
-	local indent_level = 0
-	local indent_char = "  " -- Two spaces for indentation
+  if not type_str or type_str:match("^%s*$") then
+    return ""
+  end
 
-	-- Add a newline and indent after opening braces and semicolons
-	type_str = type_str:gsub("({)", "%1\n")
-	type_str = type_str:gsub("(;)", "%1\n")
-	-- Add a newline before closing braces
-	type_str = type_str:gsub("(})", "\n%1")
+  local formatted_parts = {}
+  local indent_level = 0
 
-	for char in type_str:gmatch(".") do
-		if char == "{" then
-			formatted = formatted .. "{\n"
-			indent_level = indent_level + 1
-			formatted = formatted .. string.rep(indent_char, indent_level)
-		elseif char == "}" then
-			indent_level = indent_level - 1
-			if indent_level < 0 then
-				indent_level = 0
-			end -- Safety check
-			-- Remove trailing spaces from previous line before adding the brace
-			formatted = formatted:gsub("%s*$", "")
-			formatted = formatted .. "\n" .. string.rep(indent_char, indent_level) .. "}"
-		elseif char == "\n" then
-			-- Trim whitespace and add a newline, followed by new indentation
-			formatted = formatted:gsub("%s*$", "") .. "\n" .. string.rep(indent_char, indent_level)
-		else
-			formatted = formatted .. char
-		end
-	end
+  -- 1. Pre-process the string to normalize spacing and add newlines deterministically.
+  -- This makes parsing by line much easier.
+  type_str = type_str:gsub("%s*([{}|;,])%s*", "%1") -- Collapse whitespace around delimiters
+  type_str = type_str:gsub("([{|,;])", "%1\n") -- Add newline AFTER {, |, ,, ;
+  type_str = type_str:gsub("}", "\n}")           -- Add newline BEFORE }
 
-	-- Final cleanup: remove empty lines and trailing/leading whitespace
-	formatted = formatted:gsub("\n%s*\n", "\n")
-	formatted = formatted:gsub("^%s+", ""):gsub("%s+$", "")
-	-- Remove space after a newline which might be added by the loop
-	formatted = formatted:gsub("\n ", "\n")
+  -- 2. Iterate over lines, not characters, to apply indentation.
+  for line in type_str:gmatch("([^\n]+)") do
+    line = line:match("^%s*(.-)%s*$") -- Trim whitespace from the line
 
-	return formatted
+    if line:find("}", 1, true) then
+      indent_level = indent_level - 1
+    end
+    
+    -- Ensure indent level never goes below zero
+    if indent_level < 0 then indent_level = 0 end
+
+    if not line:match("^%s*$") then -- Don't add empty lines
+        table.insert(formatted_parts, string.rep(config.indent, indent_level) .. line)
+    end
+
+    if line:find("{", 1, true) then
+      indent_level = indent_level + 1
+    end
+  end
+
+  -- 3. Final cleanup and concatenation
+  local result = table.concat(formatted_parts, "\n")
+  return result:gsub("\n%s*\n", "\n") -- Remove any leftover blank lines
 end
+
 
 --[[
 The main function that reformats a diagnostic message.
-It looks for the common "Type '...' is not assignable to type '...'" pattern.
+It now uses a more flexible regex pattern to catch more error variations.
 ]]
 local function prettify_message(msg)
-	-- Match the two types in the error message
-	local match1, match2 = msg:match("Type '(.+)' is not assignable to type '(.+)'%.")
+  -- A more robust pattern:
+  -- - Case-insensitive '[Tt]ype'
+  -- - Allows for any characters between the two types with '.*'
+  -- - Makes the final period optional with '.?'
+  local actual, expected = msg:match("[Tt]ype '(.+)' is not assignable to .*type '(.+)'%.?")
 
-	if match1 and match2 then
-		-- We found a type mismatch error, let's format it.
-		local formatted_type1 = format_type_string(match1)
-		local formatted_type2 = format_type_string(match2)
+  -- Handle another common pattern for function arguments
+  if not actual then
+    actual, expected = msg:match("[Aa]rgument of type '(.+)' is not assignable to parameter of type '(.+)'%.?")
+  end
 
-		local new_message = {
-			"❌ Type Mismatch",
-			"=================",
-			"Got:",
-			formatted_type1,
-			"", -- Spacer
-			"Expected:",
-			formatted_type2,
-			"=================",
-		}
+  if actual and expected then
+    local formatted_actual = format_type_string(actual)
+    local formatted_expected = format_type_string(expected)
 
-		-- Check for more details in the original message
-		local details = msg:match("'%. (.+)")
-		if details then
-			table.insert(new_message, "")
-			table.insert(new_message, "Details: " .. details)
-		end
+    -- Don't format if the types are simple and short (less than 20 chars and no newlines)
+    if #actual < 20 and #expected < 20 and not actual:find("[{;]") and not expected:find("[{;]") then
+        return msg
+    end
 
-		return table.concat(new_message, "\n")
-	end
+    local new_message = {
+      "❌ Type Mismatch",
+      "=================",
+      "Actual type:",
+      formatted_actual,
+      "",
+      "Expected type:",
+      formatted_expected,
+      "=================",
+    }
+    return table.concat(new_message, "\n")
+  end
 
-	-- If the pattern doesn't match, return the original message
-	return msg
+  return msg -- Return original message if no pattern matches
 end
 
 --[[
-The setup function that configures Neovim's diagnostics.
-This is the function you'll call from your init.lua.
+The setup function now accepts user options to allow for configuration.
 ]]
-M.setup = function()
-	vim.diagnostic.config({
-		-- This function is called for each diagnostic message.
-		format = function(diagnostic)
-			-- Only apply formatting to errors from the TypeScript language server
-			if diagnostic.source == "tsserver" and diagnostic.severity == vim.diagnostic.severity.ERROR then
-				diagnostic.message = prettify_message(diagnostic.message)
-			end
-			return diagnostic
-		end,
-	})
-	vim.notify("✅ TypeScript Error Prettifier is active!", vim.log.levels.INFO)
-end
+M.setup = function(opts)
+  -- Merge user options with defaults
+  if opts then
+    config = vim.tbl_deep_extend("force", config, opts)
+  end
 
--- If you place this file in `plugin/`, Neovim will run it on startup.
--- You can call setup directly here if you don't need lazy loading.
--- For lazy-loading with package managers, you'll call M.setup() yourself.
-if vim.g.ts_error_prettifier_auto_setup then
-	M.setup()
+  vim.diagnostic.config({
+    format = function(diagnostic)
+      if
+        diagnostic.source == "tsserver"
+        and diagnostic.severity == vim.diagnostic.severity.ERROR
+        and diagnostic.message
+      then
+        diagnostic.message = prettify_message(diagnostic.message)
+      end
+      return diagnostic
+    end,
+  })
+
+  vim.notify("✅ TypeScript Error Prettifier is active!", vim.log.levels.INFO, { title = "ts-error-prettifier" })
 end
 
 return M
