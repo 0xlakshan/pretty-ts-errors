@@ -1,5 +1,24 @@
-#### How to Install and Use the Plugin
-Here is how you can install this plugin using lazy.nvim (recommended) or packer.nvim. The key is to place the plugin code where Neovim can find it and then call the setup function.
+#### ts-error-prettifier.nvim
+Formats complex TypeScript type errors in Neovim diagnostics for improved readability.
+
+#### Requirements
+- Neovim 0.9 or later
+- tsserver via nvim-lspconfig
+- typescript-language-server installed globally or locally:
+
+```
+npm install -g typescript typescript-language-server
+```
+
+Place the plugin at:
+```
+~/.config/nvim/lua/ts-error-prettifier.lua
+```
+
+Add this line to your ```init.lua```
+```
+require("ts-error-prettifier").setup()
+```
 
 Before:
 ```
