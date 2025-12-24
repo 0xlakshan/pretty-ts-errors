@@ -5,11 +5,15 @@ local config = {
   max_line_length = 80,
   show_icons = true,
   auto_open_float = false,
+  use_diff_highlighting = true,
   highlight_groups = {
     title = "DiagnosticError",
     actual = "DiagnosticInfo",
     expected = "DiagnosticHint",
     separator = "Comment",
+    diff_add = "DiffAdd",
+    diff_delete = "DiffDelete",
+    diff_text = "DiffText",
   },
   patterns = {
     assignability = {
@@ -36,6 +40,95 @@ local function get_nesting_depth(str)
     end
   end
   return depth
+end
+
+local function tokenize_type(type_str)
+  local tokens = {}
+  local current = ""
+  
+  for i = 1, #type_str do
+    local char = type_str:sub(i, i)
+    if char:match("[{}|;:,<>%[%]()%s]") then
+      if #current > 0 then
+        table.insert(tokens, current)
+        current = ""
+      end
+      if not char:match("%s") then
+        table.insert(tokens, char)
+      end
+    else
+      current = current .. char
+    end
+  end
+  
+  if #current > 0 then
+    table.insert(tokens, current)
+  end
+  
+  return tokens
+end
+
+local function compute_diff(tokens1, tokens2)
+  local m, n = #tokens1, #tokens2
+  local dp = {}
+  
+  for i = 0, m do
+    dp[i] = {}
+    for j = 0, n do
+      if i == 0 then
+        dp[i][j] = j
+      elseif j == 0 then
+        dp[i][j] = i
+      else
+        local cost = (tokens1[i] == tokens2[j]) and 0 or 1
+        dp[i][j] = math.min(
+          dp[i-1][j] + 1,
+          dp[i][j-1] + 1,
+          dp[i-1][j-1] + cost
+        )
+      end
+    end
+  end
+  
+  local diff = {}
+  local i, j = m, n
+  
+  while i > 0 or j > 0 do
+    if i > 0 and j > 0 and tokens1[i] == tokens2[j] then
+      table.insert(diff, 1, {type = "equal", token = tokens1[i]})
+      i, j = i - 1, j - 1
+    elseif j > 0 and (i == 0 or dp[i][j-1] <= dp[i-1][j]) then
+      table.insert(diff, 1, {type = "add", token = tokens2[j]})
+      j = j - 1
+    else
+      table.insert(diff, 1, {type = "delete", token = tokens1[i]})
+      i = i - 1
+    end
+  end
+  
+  return diff
+end
+
+local function highlight_diff(type1, type2)
+  local tokens1 = tokenize_type(type1)
+  local tokens2 = tokenize_type(type2)
+  local diff = compute_diff(tokens1, tokens2)
+  
+  local result1 = {}
+  local result2 = {}
+  
+  for _, item in ipairs(diff) do
+    if item.type == "equal" then
+      table.insert(result1, item.token)
+      table.insert(result2, item.token)
+    elseif item.type == "delete" then
+      table.insert(result1, "[-" .. item.token .. "-]")
+    elseif item.type == "add" then
+      table.insert(result2, "{+" .. item.token .. "+}")
+    end
+  end
+  
+  return table.concat(result1, " "), table.concat(result2, " ")
 end
 
 local function format_type_string(type_str)
@@ -171,16 +264,35 @@ local function format_pattern_match(pattern_config, match1, match2)
 
   local icon = config.show_icons and "❌ " or ""
   local separator = string.rep("=", 50)
-  local new_message = {
-    icon .. "Type Mismatch",
-    separator,
-    pattern_config.labels[1],
-    formatted_match1,
-    "",
-    pattern_config.labels[2],
-    formatted_match2,
-    separator,
-  }
+  
+  local new_message
+  if config.use_diff_highlighting then
+    local diff1, diff2 = highlight_diff(match1, match2)
+    new_message = {
+      icon .. "Type Mismatch (diff view)",
+      separator,
+      pattern_config.labels[1],
+      diff1,
+      "",
+      pattern_config.labels[2],
+      diff2,
+      "",
+      "Legend: [-removed-] {+added+}",
+      separator,
+    }
+  else
+    new_message = {
+      icon .. "Type Mismatch",
+      separator,
+      pattern_config.labels[1],
+      formatted_match1,
+      "",
+      pattern_config.labels[2],
+      formatted_match2,
+      separator,
+    }
+  end
+  
   return table.concat(new_message, "\n")
 end
 
