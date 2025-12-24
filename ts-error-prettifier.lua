@@ -1,10 +1,5 @@
--- ts-error-prettifier.lua
--- An improved Neovim plugin to make TypeScript errors more readable.
--- Location: e.g., ~/.config/nvim/lua/ts-error-prettifier.lua
-
 local M = {}
 
--- Default configuration options
 local config = {
   indent = "  ",
   max_line_length = 80,
@@ -32,7 +27,6 @@ local config = {
   },
 }
 
--- Utility function to count nested depth
 local function get_nesting_depth(str)
   local depth = 0
   for i = 1, #str do
@@ -44,13 +38,11 @@ local function get_nesting_depth(str)
   return depth
 end
 
--- Enhanced type formatter with better handling of complex types
 local function format_type_string(type_str)
   if not type_str or type_str:match("^%s*$") then
     return ""
   end
 
-  -- Handle simple types quickly
   if #type_str < 20 and not type_str:find("[{;|]") then
     return type_str
   end
@@ -59,21 +51,14 @@ local function format_type_string(type_str)
   local indent_level = 0
   local in_generic = 0
 
-  -- Normalize spacing around key characters
   type_str = type_str:gsub("%s*([{}|;,])%s*", "%1")
-  
-  -- Handle angle brackets for generics
   type_str = type_str:gsub("%s*([<>])%s*", "%1")
-  
-  -- Add strategic newlines
   type_str = type_str:gsub("([{|,;])", "%1\n")
   type_str = type_str:gsub("}", "\n}")
-  
-  -- Process each line
+
   for line in type_str:gmatch("([^\n]+)") do
     line = line:match("^%s*(.-)%s*$")
-    
-    -- Track generic depth
+
     for i = 1, #line do
       local char = line:sub(i, i)
       if char == "<" then
@@ -82,47 +67,110 @@ local function format_type_string(type_str)
         in_generic = math.max(0, in_generic - 1)
       end
     end
-    
-    -- Adjust indentation for closing braces
+
     if line:find("}", 1, true) and in_generic == 0 then
       indent_level = math.max(0, indent_level - 1)
     end
-    
-    -- Add indented line if not empty
+
     if not line:match("^%s*$") then
       local indented = string.rep(config.indent, indent_level) .. line
-      
-      -- Break long lines at union operators
+
       if #indented > config.max_line_length and line:find("|") then
         indented = indented:gsub("%s*|%s*", "\n" .. string.rep(config.indent, indent_level) .. "| ")
       end
-      
       table.insert(formatted_parts, indented)
     end
-    
-    -- Adjust indentation for opening braces
+
     if line:find("{", 1, true) and in_generic == 0 then
       indent_level = indent_level + 1
     end
   end
-  
+
   local result = table.concat(formatted_parts, "\n")
   return result:gsub("\n%s*\n", "\n")
 end
 
--- Format a specific error pattern
+local function simplify_type(type_str)
+  if not type_str then return "" end
+  
+  type_str = type_str:match("^%s*(.-)%s*$")
+  
+  if #type_str <= 25 then
+    return type_str
+  end
+  
+  if type_str:find("^%s*{") then
+    local props = {}
+    for prop in type_str:gmatch("(%w+)%s*:") do
+      table.insert(props, prop)
+      if #props >= 3 then break end
+    end
+    if #props > 0 then
+      local result = "{ " .. table.concat(props, ", ")
+      local total_props = 0
+      for _ in type_str:gmatch("(%w+)%s*:") do
+        total_props = total_props + 1
+      end
+      if total_props > #props then
+        result = result .. ", ..."
+      end
+      return result .. " }"
+    end
+  end
+  
+  if type_str:find("|") then
+    local parts = {}
+    for part in type_str:gmatch("([^|]+)") do
+      part = part:match("^%s*(.-)%s*$")
+      table.insert(parts, part)
+      if #parts >= 3 then break end
+    end
+    if #parts > 0 then
+      local result = table.concat(parts, " | ")
+      local total_parts = 0
+      for _ in type_str:gmatch("([^|]+)") do
+        total_parts = total_parts + 1
+      end
+      if total_parts > #parts then
+        result = result .. " | ..."
+      end
+      return result
+    end
+  end
+  
+  type_str = type_str:gsub("Array<(.-)>", "%1[]")
+  
+  if #type_str > 40 then
+    return type_str:sub(1, 37) .. "..."
+  end
+  
+  return type_str
+end
+
+local function truncate_for_virtual_text(msg)
+  for name, pattern_config in pairs(config.patterns) do
+    local match1, match2 = msg:match(pattern_config.pattern)
+    if match1 and match2 then
+      local simplified1 = simplify_type(match1)
+      local simplified2 = simplify_type(match2)
+      return string.format("%s → %s", simplified1, simplified2)
+    end
+  end
+  
+  local first_line = msg:match("^([^\n]+)")
+  return first_line or msg
+end
+
 local function format_pattern_match(pattern_config, match1, match2)
   local formatted_match1 = format_type_string(match1)
   local formatted_match2 = format_type_string(match2)
-  
-  -- Don't format if both are simple
+
   if #match1 < 20 and #match2 < 20 and not match1:find("[{;|]") and not match2:find("[{;|]") then
     return nil
   end
-  
+
   local icon = config.show_icons and "❌ " or ""
   local separator = string.rep("=", 50)
-  
   local new_message = {
     icon .. "Type Mismatch",
     separator,
@@ -133,13 +181,10 @@ local function format_pattern_match(pattern_config, match1, match2)
     formatted_match2,
     separator,
   }
-  
   return table.concat(new_message, "\n")
 end
 
--- Main prettification function with multiple pattern support
 local function prettify_message(msg)
-  -- Try each configured pattern
   for name, pattern_config in pairs(config.patterns) do
     local match1, match2 = msg:match(pattern_config.pattern)
     if match1 and match2 then
@@ -149,18 +194,15 @@ local function prettify_message(msg)
       end
     end
   end
-  
   return msg
 end
 
--- Create a floating window with formatted diagnostics
 local function show_diagnostic_float()
   local diagnostics = vim.diagnostic.get(0, { lnum = vim.fn.line(".") - 1 })
-  
   if #diagnostics == 0 then
     return
   end
-  
+
   local lines = {}
   for _, diag in ipairs(diagnostics) do
     local formatted = prettify_message(diag.message)
@@ -169,7 +211,7 @@ local function show_diagnostic_float()
     end
     table.insert(lines, "")
   end
-  
+
   vim.diagnostic.open_float(nil, {
     border = "rounded",
     format = function(diagnostic)
@@ -178,11 +220,9 @@ local function show_diagnostic_float()
   })
 end
 
--- Setup function with enhanced configuration
 M.setup = function(opts)
   config = vim.tbl_deep_extend("force", config, opts or {})
-  
-  -- Configure diagnostics formatting
+
   vim.diagnostic.config({
     format = function(diagnostic)
       if diagnostic.source == "tsserver" and diagnostic.severity == vim.diagnostic.severity.ERROR then
@@ -194,16 +234,14 @@ M.setup = function(opts)
       prefix = config.show_icons and "●" or "■",
       format = function(diagnostic)
         if diagnostic.source == "tsserver" and diagnostic.severity == vim.diagnostic.severity.ERROR then
-          -- Show abbreviated message in virtual text
-          local first_line = diagnostic.message:match("^([^\n]+)")
-          return first_line or diagnostic.message
+          local truncated = truncate_for_virtual_text(diagnostic.message)
+          return truncated
         end
         return diagnostic.message
       end,
     },
   })
-  
-  -- Set up keybindings if auto_open_float is enabled
+
   if config.auto_open_float then
     vim.api.nvim_create_autocmd("CursorHold", {
       pattern = { "*.ts", "*.tsx", "*.js", "*.jsx" },
@@ -215,10 +253,9 @@ M.setup = function(opts)
       end,
     })
   end
-  
-  -- Create user command for manual float opening
+
   vim.api.nvim_create_user_command("TsPrettifyFloat", show_diagnostic_float, {})
-  
+
   local icon = config.show_icons and "✅ " or ""
   vim.notify(
     icon .. "TypeScript Error Prettifier is active!",
@@ -227,7 +264,6 @@ M.setup = function(opts)
   )
 end
 
--- Export show_diagnostic_float for manual use
 M.show_float = show_diagnostic_float
 
 return M
