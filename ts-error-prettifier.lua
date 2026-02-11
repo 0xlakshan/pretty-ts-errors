@@ -450,25 +450,18 @@ local function show_diagnostic_float()
 
     float_open = true
 
-    local lines = {}
+    local modified_diagnostics = {}
     for _, diag in ipairs(diagnostics) do
       if diag and diag.message then
-        local formatted = prettify_message(diag.message)
-        for line in formatted:gmatch("[^\n]+") do
-          table.insert(lines, line)
-        end
-        table.insert(lines, "")
+        local diag_copy = vim.deepcopy(diag)
+        diag_copy.message = prettify_message(diag.message)
+        table.insert(modified_diagnostics, diag_copy)
       end
     end
 
     vim.diagnostic.open_float(nil, {
       border = "rounded",
-      format = function(diagnostic)
-        if not diagnostic or not diagnostic.message then
-          return ""
-        end
-        return diagnostic.message
-      end,
+      source = "always",
     })
     
     vim.defer_fn(function()
@@ -485,27 +478,34 @@ M.setup = function(opts)
   return safe_call(function()
     config = vim.tbl_deep_extend("force", config, opts or {})
 
-    vim.diagnostic.config({
-      format = function(diagnostic)
-        if not diagnostic or not diagnostic.message then
-          return ""
+    local original_handlers = vim.diagnostic.handlers
+    vim.diagnostic.handlers.virtual_text = {
+      show = function(namespace, bufnr, diagnostics, opts_vt)
+        local modified = {}
+        for _, diag in ipairs(diagnostics) do
+          local diag_copy = vim.deepcopy(diag)
+          if diag.source == "tsserver" and diag.severity == vim.diagnostic.severity.ERROR then
+            diag_copy.message = truncate_for_virtual_text(diag.message)
+          end
+          table.insert(modified, diag_copy)
         end
-        
-        if diagnostic.source == "tsserver" and diagnostic.severity == vim.diagnostic.severity.ERROR then
-          diagnostic.message = prettify_message(diagnostic.message)
-        end
-        return diagnostic
+        return original_handlers.virtual_text.show(namespace, bufnr, modified, opts_vt)
       end,
+      hide = original_handlers.virtual_text.hide,
+    }
+
+    vim.diagnostic.config({
       virtual_text = {
         prefix = config.show_icons and "●" or "■",
+      },
+      float = {
         format = function(diagnostic)
           if not diagnostic or not diagnostic.message then
             return ""
           end
           
           if diagnostic.source == "tsserver" and diagnostic.severity == vim.diagnostic.severity.ERROR then
-            local truncated = truncate_for_virtual_text(diagnostic.message)
-            return truncated
+            return prettify_message(diagnostic.message)
           end
           return diagnostic.message
         end,
