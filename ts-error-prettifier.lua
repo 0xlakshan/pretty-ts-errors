@@ -62,7 +62,19 @@ local function validate_config(user_config)
     return false
   end
 
+  local boolean_fields = { "show_icons", "auto_open_float", "use_diff_highlighting", "show_type_preview", "debug" }
+  for _, field in ipairs(boolean_fields) do
+    if user_config[field] ~= nil and type(user_config[field]) ~= "boolean" then
+      vim.notify("ts-error-prettifier: " .. field .. " must be a boolean", vim.log.levels.ERROR)
+      return false
+    end
+  end
+
   if user_config.highlight_groups then
+    if type(user_config.highlight_groups) ~= "table" then
+      vim.notify("ts-error-prettifier: highlight_groups must be a table", vim.log.levels.ERROR)
+      return false
+    end
     for group, name in pairs(user_config.highlight_groups) do
       if type(name) ~= "string" then
         vim.notify("ts-error-prettifier: highlight group names must be strings", vim.log.levels.ERROR)
@@ -72,9 +84,21 @@ local function validate_config(user_config)
   end
 
   if user_config.patterns then
+    if type(user_config.patterns) ~= "table" then
+      vim.notify("ts-error-prettifier: patterns must be a table", vim.log.levels.ERROR)
+      return false
+    end
     for name, pattern_config in pairs(user_config.patterns) do
+      if type(pattern_config) ~= "table" then
+        vim.notify("ts-error-prettifier: pattern '" .. name .. "' must be a table", vim.log.levels.ERROR)
+        return false
+      end
       if not pattern_config.pattern or not pattern_config.labels then
         vim.notify("ts-error-prettifier: pattern '" .. name .. "' missing required fields", vim.log.levels.ERROR)
+        return false
+      end
+      if type(pattern_config.pattern) ~= "string" then
+        vim.notify("ts-error-prettifier: pattern '" .. name .. "' pattern must be a string", vim.log.levels.ERROR)
         return false
       end
       if type(pattern_config.labels) ~= "table" or #pattern_config.labels < 2 then
@@ -85,6 +109,56 @@ local function validate_config(user_config)
   end
 
   return true
+end
+
+local function get_ts_error_diagnostics(bufnr, lnum)
+  if not bufnr or bufnr == 0 then
+    bufnr = vim.api.nvim_get_current_buf()
+  end
+
+  return safe_call(function()
+    local all_diagnostics = vim.diagnostic.get(bufnr, lnum and { lnum = lnum } or nil)
+    if not all_diagnostics or #all_diagnostics == 0 then
+      return {}
+    end
+
+    local ts_errors = {}
+    for _, diag in ipairs(all_diagnostics) do
+      if diag and diag.message and diag.source == "tsserver" and diag.severity == vim.diagnostic.severity.ERROR then
+        table.insert(ts_errors, diag)
+      end
+    end
+
+    return ts_errors
+  end, {})
+end
+
+local function extract_type_mismatch(msg)
+  if not msg or type(msg) ~= "string" then
+    return nil
+  end
+
+  return safe_call(function()
+    for name, pattern_config in pairs(config.patterns or {}) do
+      if not pattern_config or not pattern_config.pattern then
+        goto continue
+      end
+
+      local match1, match2 = msg:match(pattern_config.pattern)
+      if match1 and match2 then
+        return {
+          actual = match1,
+          expected = match2,
+          pattern_name = name,
+          pattern_config = pattern_config,
+        }
+      end
+
+      ::continue::
+    end
+
+    return nil
+  end, nil)
 end
 
 local function get_nesting_depth(str)
@@ -358,19 +432,11 @@ local function truncate_for_virtual_text(msg)
   end
 
   return safe_call(function()
-    for name, pattern_config in pairs(config.patterns or {}) do
-      if not pattern_config or not pattern_config.pattern then
-        goto continue
-      end
-
-      local match1, match2 = msg:match(pattern_config.pattern)
-      if match1 and match2 then
-        local simplified1 = simplify_type(match1)
-        local simplified2 = simplify_type(match2)
-        return string.format("%s → %s", simplified1, simplified2)
-      end
-
-      ::continue::
+    local mismatch = extract_type_mismatch(msg)
+    if mismatch then
+      local simplified1 = simplify_type(mismatch.actual)
+      local simplified2 = simplify_type(mismatch.expected)
+      return string.format("%s → %s", simplified1, simplified2)
     end
 
     local first_line = msg:match("^([^\n]+)")
@@ -432,20 +498,12 @@ local function prettify_message(msg)
   end
 
   return safe_call(function()
-    for name, pattern_config in pairs(config.patterns or {}) do
-      if not pattern_config or not pattern_config.pattern then
-        goto continue
+    local mismatch = extract_type_mismatch(msg)
+    if mismatch then
+      local formatted = format_pattern_match(mismatch.pattern_config, mismatch.actual, mismatch.expected)
+      if formatted then
+        return formatted
       end
-
-      local match1, match2 = msg:match(pattern_config.pattern)
-      if match1 and match2 then
-        local formatted = format_pattern_match(pattern_config, match1, match2)
-        if formatted then
-          return formatted
-        end
-      end
-
-      ::continue::
     end
 
     return msg
@@ -460,35 +518,23 @@ local function show_inline_preview()
   return safe_call(function()
     vim.api.nvim_buf_clear_namespace(0, preview_ns, 0, -1)
 
-    local diagnostics = vim.diagnostic.get(0, { lnum = vim.fn.line(".") - 1 })
+    local diagnostics = get_ts_error_diagnostics(0, vim.fn.line(".") - 1)
     if not diagnostics or #diagnostics == 0 then
       return
     end
 
     for _, diag in ipairs(diagnostics) do
-      if diag and diag.message and diag.source == "tsserver" and diag.severity == vim.diagnostic.severity.ERROR then
-        for name, pattern_config in pairs(config.patterns or {}) do
-          if not pattern_config or not pattern_config.pattern then
-            goto continue
-          end
-
-          local match1, match2 = diag.message:match(pattern_config.pattern)
-          if match1 and match2 then
-            local simplified_actual = simplify_type(match1)
-            local simplified_expected = simplify_type(match2)
-            
-            local preview_text = string.format("  ⮕ Expected: %s", simplified_expected)
-            
-            vim.api.nvim_buf_set_extmark(0, preview_ns, diag.lnum, 0, {
-              virt_text = {{ preview_text, "DiagnosticHint" }},
-              virt_text_pos = "eol",
-            })
-            
-            break
-          end
-
-          ::continue::
-        end
+      local mismatch = extract_type_mismatch(diag.message)
+      if mismatch then
+        local simplified_expected = simplify_type(mismatch.expected)
+        local preview_text = string.format("  ⮕ Expected: %s", simplified_expected)
+        
+        vim.api.nvim_buf_set_extmark(0, preview_ns, diag.lnum, 0, {
+          virt_text = {{ preview_text, "DiagnosticHint" }},
+          virt_text_pos = "eol",
+        })
+        
+        break
       end
     end
   end, nil)
